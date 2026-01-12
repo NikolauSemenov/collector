@@ -30,4 +30,4 @@ deploy:
 	@eval $$(minikube docker-env) && \
 		docker build -t collector:latest . && \
 		kubectl apply -f k8s && \
-		kubectl rollout restart deployment auth -n backend
+		kubectl rollout restart deployment collector -n backend
