@@ -6,7 +6,6 @@ import (
 	"collector/internal/logging"
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
