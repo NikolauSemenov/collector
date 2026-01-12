@@ -29,4 +29,5 @@ swag_init:
 deploy:
 	@eval $$(minikube docker-env) && \
 		docker build -t collector:latest . && \
-		kubectl apply -f k8s/deployment.yaml
+		kubectl apply -f k8s && \
+		kubectl rollout restart deployment auth -n backend
