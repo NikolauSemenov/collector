@@ -208,18 +208,18 @@ func (w *Worker) handleMessage(ctx context.Context, data []byte) error {
 	if event.Email == "" {
 		return fmt.Errorf("event email is empty")
 	}
-	if strings.TrimSpace(event.Code) == "" {
+
+	encryptedCode := strings.TrimSpace(event.Code)
+	if encryptedCode == "" {
 		return fmt.Errorf("event code is empty")
 	}
 
-	token, err := utils.EncryptCode(w.config.EmailSecretKey, event.Code)
+	decryptedCode, err := utils.DecryptCode(w.config.EmailSecretKey, encryptedCode)
 	if err != nil {
-		return fmt.Errorf("encrypt code: %w", err)
+		return fmt.Errorf("decrypt code: %w", err)
 	}
 
-	body := emailBodyPrefix + token
-
-	if err := w.sender.Send(event.Email, emailSubject, body); err != nil {
+	if err := w.sender.Send(event.Email, emailSubject, emailBodyPrefix+decryptedCode); err != nil {
 		return fmt.Errorf("send email: %w", err)
 	}
 

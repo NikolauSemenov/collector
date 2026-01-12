@@ -26,6 +26,8 @@ spec:
               value: "verify_email_events"
             - name: BROKER_CONSUMER_GROUP
               value: "email.smtp"
+            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+              value: "true"
             - name: BROKER_TIMEOUT
               value: "5s"
             - name: EMAIL_HOST

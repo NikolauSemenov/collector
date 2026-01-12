@@ -7,7 +7,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/fernet/fernet-go"
 )
@@ -85,12 +84,24 @@ func TestWorker_HandleMessage_OK(t *testing.T) {
 	t.Parallel()
 
 	s := &fakeSender{}
+	cfg := newTestConfig(t)
 	w := &Worker{
 		sender: s,
-		config: newTestConfig(t),
+		config: cfg,
 	}
 
-	data := []byte(`{"name":"Ivan","email":"user@example.com","code":"123456"}`)
+	key, err := fernet.DecodeKey(cfg.EmailSecretKey)
+	if err != nil {
+		t.Fatalf("failed to decode key: %v", err)
+	}
+
+	originalCode := "123456"
+	encryptedToken, err := fernet.EncryptAndSign([]byte(originalCode), key)
+	if err != nil {
+		t.Fatalf("failed to encrypt code: %v", err)
+	}
+
+	data := []byte(`{"name":"Ivan","email":"user@example.com","code":"` + string(encryptedToken) + `"}`)
 
 	if err := w.handleMessage(context.Background(), data); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
@@ -109,14 +120,9 @@ func TestWorker_HandleMessage_OK(t *testing.T) {
 		t.Fatalf("expected non-empty text")
 	}
 
-	token := strings.TrimPrefix(s.lastText, "Код доступа: ")
-	token = strings.TrimSpace(token)
-	if token == "" {
-		t.Fatalf("expected token after prefix in email body, got %q", s.lastText)
-	}
-
-	if decoded := fernet.VerifyAndDecrypt([]byte(token), time.Minute, []*fernet.Key{mustDecodeKey(t, w.config.EmailSecretKey)}); decoded == nil {
-		t.Fatalf("expected token to be decryptable with secret key")
+	expectedBody := "Код доступа: " + originalCode
+	if s.lastText != expectedBody {
+		t.Fatalf("expected body %q, got %q", expectedBody, s.lastText)
 	}
 }
 
@@ -165,12 +171,23 @@ func TestWorker_HandleMessage_SenderError(t *testing.T) {
 	t.Parallel()
 
 	s := &fakeSender{err: errors.New("smtp down")}
+	cfg := newTestConfig(t)
 	w := &Worker{
 		sender: s,
-		config: newTestConfig(t),
+		config: cfg,
 	}
 
-	data := []byte(`{"name":"Ivan","email":"user@example.com","code":"123456"}`)
+	key, err := fernet.DecodeKey(cfg.EmailSecretKey)
+	if err != nil {
+		t.Fatalf("failed to decode key: %v", err)
+	}
+
+	encryptedToken, err := fernet.EncryptAndSign([]byte("123456"), key)
+	if err != nil {
+		t.Fatalf("failed to encrypt code: %v", err)
+	}
+
+	data := []byte(`{"name":"Ivan","email":"user@example.com","code":"` + string(encryptedToken) + `"}`)
 	if err := w.handleMessage(context.Background(), data); err == nil {
 		t.Fatalf("expected error, got nil")
 	}
@@ -206,16 +223,6 @@ func TestWorker_Run_ClosesConsumerOnExit(t *testing.T) {
 	if !cons.closed {
 		t.Fatalf("expected consumer to be closed")
 	}
-}
-
-func mustDecodeKey(t *testing.T, encoded string) *fernet.Key {
-	t.Helper()
-
-	k, err := fernet.DecodeKey(encoded)
-	if err != nil {
-		t.Fatalf("failed to decode fernet key: %v", err)
-	}
-	return k
 }
 
 type nopLogger struct{}

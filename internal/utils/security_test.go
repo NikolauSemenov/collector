@@ -1,51 +1,80 @@
 package utils
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/fernet/fernet-go"
 )
 
-// TestEncryptCode_ProducesToken verifies that EncryptCode returns a non-empty Fernet token.
-func TestEncryptCode_ProducesToken(t *testing.T) {
+func TestDecryptCode_ValidToken(t *testing.T) {
 	t.Parallel()
 
-	secretKey := newFernetKey(t).Encode()
+	key := newFernetKey(t)
+	secretKey := key.Encode()
+	originalCode := "123456"
 
-	token, err := EncryptCode(secretKey, "123456")
+	token, err := fernet.EncryptAndSign([]byte(originalCode), key)
 	if err != nil {
-		t.Fatalf("EncryptCode returned error: %v", err)
+		t.Fatalf("failed to encrypt: %v", err)
 	}
-	if strings.TrimSpace(token) == "" {
-		t.Fatalf("expected non-empty token")
+
+	decrypted, err := DecryptCode(secretKey, string(token))
+	if err != nil {
+		t.Fatalf("DecryptCode returned error: %v", err)
+	}
+
+	if decrypted != originalCode {
+		t.Fatalf("expected decrypted code %q, got %q", originalCode, decrypted)
 	}
 }
 
-// TestEncryptCode_EmptyCode ensures EncryptCode rejects an empty/whitespace-only code value.
-func TestEncryptCode_EmptyCode(t *testing.T) {
+func TestDecryptCode_EmptyToken(t *testing.T) {
 	t.Parallel()
 
 	secretKey := newFernetKey(t).Encode()
 
-	if _, err := EncryptCode(secretKey, ""); err == nil {
+	if _, err := DecryptCode(secretKey, ""); err == nil {
 		t.Fatalf("expected error, got nil")
 	}
-	if _, err := EncryptCode(secretKey, "   "); err == nil {
-		t.Fatalf("expected error for whitespace-only code, got nil")
+	if _, err := DecryptCode(secretKey, "   "); err == nil {
+		t.Fatalf("expected error for whitespace-only token, got nil")
 	}
 }
 
-// TestEncryptCode_InvalidKey ensures EncryptCode fails on an invalid secret key.
-func TestEncryptCode_InvalidKey(t *testing.T) {
+func TestDecryptCode_InvalidKey(t *testing.T) {
 	t.Parallel()
 
-	if _, err := EncryptCode("not-a-fernet-key", "123456"); err == nil {
+	if _, err := DecryptCode("not-a-fernet-key", "gAAAAABjtest"); err == nil {
 		t.Fatalf("expected error, got nil")
 	}
 }
 
-// newFernetKey generates a fresh Fernet key for testing.
+func TestDecryptCode_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	secretKey := newFernetKey(t).Encode()
+
+	if _, err := DecryptCode(secretKey, "invalid-token"); err == nil {
+		t.Fatalf("expected error for invalid token, got nil")
+	}
+}
+
+func TestDecryptCode_WrongKey(t *testing.T) {
+	t.Parallel()
+
+	key1 := newFernetKey(t)
+	key2 := newFernetKey(t)
+
+	token, err := fernet.EncryptAndSign([]byte("123456"), key1)
+	if err != nil {
+		t.Fatalf("failed to encrypt: %v", err)
+	}
+
+	if _, err := DecryptCode(key2.Encode(), string(token)); err == nil {
+		t.Fatalf("expected error when using wrong key, got nil")
+	}
+}
+
 func newFernetKey(t *testing.T) *fernet.Key {
 	t.Helper()
 

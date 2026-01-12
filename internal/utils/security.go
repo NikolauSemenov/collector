@@ -7,21 +7,21 @@ import (
 	"github.com/fernet/fernet-go"
 )
 
-func EncryptCode(secretKey, code string) (string, error) {
+func DecryptCode(secretKey, token string) (string, error) {
 	key, err := fernet.DecodeKey(secretKey)
 	if err != nil {
 		return "", err
 	}
 
-	code = strings.TrimSpace(code)
-	if code == "" {
-		return "", fmt.Errorf("code is empty")
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", fmt.Errorf("token is empty")
 	}
 
-	token, err := fernet.EncryptAndSign([]byte(code), key)
-	if err != nil {
-		return "", err
+	decoded := fernet.VerifyAndDecrypt([]byte(token), 0, []*fernet.Key{key})
+	if decoded == nil {
+		return "", fmt.Errorf("failed to decrypt token")
 	}
 
-	return string(token), nil
+	return string(decoded), nil
 }
