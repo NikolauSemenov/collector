@@ -4,10 +4,21 @@ import (
 	"collector/internal/config"
 	"collector/internal/email"
 	"collector/internal/infrastructure/broker"
+	"collector/internal/logging"
+	"collector/internal/utils"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"runtime"
+	"strings"
 	"sync"
+)
+
+const (
+	defaultBufferSize = 256
+	emailSubject      = "Письмо от сервиса Auth"
+	emailBodyPrefix   = "Код доступа: "
 )
 
 type EmailEventSchema struct {
@@ -20,87 +31,154 @@ type Worker struct {
 	sender   email.Sender
 	consumer broker.MessageConsumer
 	config   *config.Config
-	workers  int
+	log      logging.Logger
+
+	workers int
+	bufSize int
 }
 
 func NewWorker() (*Worker, error) {
-	cfg := config.GetConfig()
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+
+	l, err := logging.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create logger: %w", err)
+	}
 
 	sender, err := email.NewSenderEmail(cfg)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create email sender: %w", err)
 	}
 
-	consumer, errCons := broker.NewConsumerKafka(cfg)
-	if errCons != nil {
-		return nil, errCons
+	consumer, err := broker.NewConsumerKafka(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("create kafka consumer: %w", err)
 	}
 
 	return &Worker{
 		sender:   sender,
 		consumer: consumer,
 		config:   cfg,
-		workers:  5,
+		log:      l.With("component", "worker"),
+		workers:  max(runtime.GOMAXPROCS(0), 1),
+		bufSize:  defaultBufferSize,
 	}, nil
 }
 
 func (w *Worker) Run(ctx context.Context) error {
-	defer w.consumer.Close()
+	if ctx == nil {
+		return fmt.Errorf("context is nil")
+	}
+	if w == nil || w.consumer == nil || w.sender == nil || w.config == nil || w.log == nil {
+		return fmt.Errorf("worker is not initialized")
+	}
 
-	msgCh := make(chan []byte, 100)
+	w.log.Info(ctx, "worker starting", "num_workers", w.workers, "buffer_size", w.bufSize)
+
+	defer func() {
+		if err := w.consumer.Close(); err != nil {
+			w.log.Error(ctx, "failed to close consumer", "err", err)
+		}
+	}()
+
+	msgCh := make(chan []byte, w.bufSize)
+
+	readErrCh := make(chan error, 1)
+	workErrCh := make(chan error, 1)
 
 	var wg sync.WaitGroup
 
 	wg.Add(1)
-	// В отдельном потоке читаем данные из брокера
 	go func() {
 		defer wg.Done()
-		w.readLoop(ctx, msgCh)
+		w.readLoop(ctx, msgCh, readErrCh)
 	}()
 
-	// В нескольких потоках обрабатываем сообщения от брокера
-	for i := 0; i < w.workers; i++ {
+	for i := range w.workers {
 		wg.Add(1)
-		go func(id int) {
-			fmt.Println("Start worker", id)
+		go func(workerID int) {
 			defer wg.Done()
-			w.workerLoop(ctx, msgCh)
+			w.workerLoop(ctx, workerID, msgCh, workErrCh)
 		}(i)
 	}
 
+	select {
+	case <-ctx.Done():
+		w.log.Info(ctx, "context cancelled, shutting down")
+	case err := <-readErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			w.log.Error(ctx, "read loop stopped with error", "err", err)
+		}
+	case err := <-workErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			w.log.Error(ctx, "worker loop reported error", "err", err)
+		}
+	}
+
+	close(msgCh)
 	wg.Wait()
-	return nil
+
+	w.log.Info(ctx, "all workers stopped")
+
+	select {
+	case err := <-readErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	default:
+	}
+	select {
+	case err := <-workErrCh:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	default:
+	}
+
+	return ctx.Err()
 }
 
-func (w *Worker) readLoop(ctx context.Context, out chan<- []byte) {
-	defer close(out)
-
+func (w *Worker) readLoop(ctx context.Context, out chan<- []byte, errCh chan<- error) {
 	for {
 		select {
 		case <-ctx.Done():
+			w.log.Info(ctx, "read loop stopping")
 			return
 		default:
 		}
 
-		// TODO: Переделать на Pool, чтобы получать пачками сообщения
 		msg, err := w.consumer.ReadMessage()
 		if err != nil {
-			fmt.Println("kafka read error:", err)
-			continue
+			w.log.Error(ctx, "failed to read message from consumer", "err", err)
+			select {
+			case errCh <- err:
+			default:
+			}
+			return
 		}
-		if msg == nil {
+
+		if len(msg) == 0 {
 			continue
 		}
 
 		select {
 		case out <- msg:
 		case <-ctx.Done():
+			w.log.Info(ctx, "read loop stopping during message send")
 			return
 		}
 	}
 }
 
-func (w *Worker) workerLoop(ctx context.Context, in <-chan []byte) {
+func (w *Worker) workerLoop(ctx context.Context, id int, in <-chan []byte, errCh chan<- error) {
+	l := w.log.With("worker_id", id)
+	l.Info(ctx, "worker started")
+
+	defer l.Info(ctx, "worker stopped")
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -109,24 +187,41 @@ func (w *Worker) workerLoop(ctx context.Context, in <-chan []byte) {
 			if !ok {
 				return
 			}
-			w.handleMessage(data)
+			if err := w.handleMessage(ctx, data); err != nil {
+				l.Error(ctx, "handle message failed", "err", err)
+				select {
+				case errCh <- err:
+				default:
+				}
+			}
 		}
 	}
 }
 
-func (w *Worker) handleMessage(data []byte) {
+func (w *Worker) handleMessage(ctx context.Context, data []byte) error {
 	var event EmailEventSchema
-
 	if err := json.Unmarshal(data, &event); err != nil {
-		fmt.Println("json error:", err)
-		return
+		return fmt.Errorf("unmarshal event: %w", err)
 	}
 
-	if err := w.sender.Send(
-		event.Email,
-		"Письмо от сервиса Auth",
-		"Код доступа: "+event.Code,
-	); err != nil {
-		fmt.Println("email send error:", err)
+	event.Email = strings.TrimSpace(event.Email)
+	if event.Email == "" {
+		return fmt.Errorf("event email is empty")
 	}
+	if strings.TrimSpace(event.Code) == "" {
+		return fmt.Errorf("event code is empty")
+	}
+
+	token, err := utils.EncryptCode(w.config.EmailSecretKey, event.Code)
+	if err != nil {
+		return fmt.Errorf("encrypt code: %w", err)
+	}
+
+	body := emailBodyPrefix + token
+
+	if err := w.sender.Send(event.Email, emailSubject, body); err != nil {
+		return fmt.Errorf("send email: %w", err)
+	}
+
+	return nil
 }

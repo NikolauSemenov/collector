@@ -4,32 +4,41 @@ import (
 	"time"
 
 	"github.com/ilyakaznacheev/cleanenv"
+	"github.com/joho/godotenv"
 )
 
 type Config struct {
 	BrokerConfig
 	EmailConfig
+	LogConfig
+}
+
+type LogConfig struct {
+	LogLevel string `env:"LOG_LEVEL"`
 }
 
 type BrokerConfig struct {
-	Servers       string        `env:"BROKER_BROKERS" env-default:"localhost:29092"`
-	TopicEmail    string        `env:"BROKER_TOPIC_EMAIL" env-default:"verify_email_events"`
-	ConsumerGroup string        `env:"BROKER_CONSUMER_GROUP" env-default:"email.smtp"`
-	Timeout       time.Duration `env:"BROKER_TIMEOUT" env-default:"5s"`
+	Servers       string        `env:"BROKER_BROKERS"`
+	TopicEmail    string        `env:"BROKER_TOPIC_EMAIL"`
+	ConsumerGroup string        `env:"BROKER_CONSUMER_GROUP"`
+	Timeout       time.Duration `env:"BROKER_TIMEOUT"`
 }
 
 type EmailConfig struct {
-	EmailHost     string `env:"EMAIL_HOST" env-default:"smtp.gmail.com"`
-	EmailPort     int    `env:"EMAIL_PORT" env-default:"465"`
-	EmailUsername string `env:"EMAIL_USERNAME" env-default:"nikolausemenov1@gmail.com"`
-	EmailPassword string `env:"EMAIL_PASSWORD" env-default:"vjpy mgrx pcrr xjiw"`
+	EmailHost      string `env:"EMAIL_HOST"`
+	EmailPort      int    `env:"EMAIL_PORT"`
+	EmailUsername  string `env:"EMAIL_USERNAME"`
+	EmailPassword  string `env:"EMAIL_PASSWORD"`
+	EmailSecretKey string `env:"EMAIL_SECRET_KEY"`
 }
 
-func GetConfig() *Config {
+func Load() (*Config, error) {
+	_ = godotenv.Load()
+
 	var cfg Config
 	errEnv := cleanenv.ReadEnv(&cfg)
 	if errEnv != nil {
-		return nil
+		return nil, errEnv
 	}
-	return &cfg
+	return &cfg, nil
 }

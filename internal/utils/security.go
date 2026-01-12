@@ -2,26 +2,26 @@ package utils
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/fernet/fernet-go"
 )
 
-var EmailSecretCode string = "ra1dkbpJGiphNLlHlbfstkTyoNvamAcIf-vq6dOzwoY="
-
-func EncryptCode(code string) (string, error) {
-
-	key, err := fernet.DecodeKey(EmailSecretCode)
+func EncryptCode(secretKey, code string) (string, error) {
+	key, err := fernet.DecodeKey(secretKey)
 	if err != nil {
 		return "", err
 	}
-	msg, _ := fernet.EncryptAndSign(
-		[]byte(code),
-		key,
-	)
 
-	if msg == nil {
-		return "", fmt.Errorf("invalid or expired token")
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return "", fmt.Errorf("code is empty")
 	}
 
-	return string(msg), nil
+	token, err := fernet.EncryptAndSign([]byte(code), key)
+	if err != nil {
+		return "", err
+	}
+
+	return string(token), nil
 }
