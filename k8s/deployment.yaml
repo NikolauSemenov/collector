@@ -21,7 +21,7 @@ spec:
             - name: LOG_LEVEL
               value: "info"
             - name: BROKER_BROKERS
-              value: "my-cluster-kafka-bootstrap.kafka.svc.cluster.local:9092"
+              value: "kafka-service.kafka.svc.cluster.local:9092"
             - name: BROKER_TOPIC_EMAIL
               value: "verify_email_events"
             - name: BROKER_CONSUMER_GROUP
