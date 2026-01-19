@@ -13,12 +13,19 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
 	defaultBufferSize = 256
-	emailSubject      = "Письмо от сервиса Auth"
-	emailBodyPrefix   = "Код доступа: "
+
+	defaultReadBackoff = 50 * time.Millisecond
+
+	defaultSendMaxRetries = 3
+	defaultSendRetryBase  = 200 * time.Millisecond
+
+	emailSubject    = "Письмо от сервиса Auth"
+	emailBodyPrefix = "Код доступа: "
 )
 
 type EmailEventSchema struct {
@@ -35,6 +42,10 @@ type Worker struct {
 
 	workers int
 	bufSize int
+
+	readBackoff    time.Duration
+	sendMaxRetries int
+	sendRetryBase  time.Duration
 }
 
 func NewWorker() (*Worker, error) {
@@ -65,6 +76,10 @@ func NewWorker() (*Worker, error) {
 		log:      l.With("component", "worker"),
 		workers:  max(runtime.GOMAXPROCS(0), 1),
 		bufSize:  defaultBufferSize,
+
+		readBackoff:    defaultReadBackoff,
+		sendMaxRetries: defaultSendMaxRetries,
+		sendRetryBase:  defaultSendRetryBase,
 	}, nil
 }
 
@@ -74,6 +89,16 @@ func (w *Worker) Run(ctx context.Context) error {
 	}
 	if w == nil || w.consumer == nil || w.sender == nil || w.config == nil || w.log == nil {
 		return fmt.Errorf("worker is not initialized")
+	}
+
+	if w.readBackoff <= 0 {
+		w.readBackoff = defaultReadBackoff
+	}
+	if w.sendMaxRetries <= 0 {
+		w.sendMaxRetries = defaultSendMaxRetries
+	}
+	if w.sendRetryBase <= 0 {
+		w.sendRetryBase = defaultSendRetryBase
 	}
 
 	w.log.Info(ctx, "worker starting", "num_workers", w.workers, "buffer_size", w.bufSize)
@@ -87,7 +112,6 @@ func (w *Worker) Run(ctx context.Context) error {
 	msgCh := make(chan []byte, w.bufSize)
 
 	readErrCh := make(chan error, 1)
-	workErrCh := make(chan error, 1)
 
 	var wg sync.WaitGroup
 
@@ -101,7 +125,7 @@ func (w *Worker) Run(ctx context.Context) error {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			w.workerLoop(ctx, workerID, msgCh, workErrCh)
+			w.workerLoop(ctx, workerID, msgCh)
 		}(i)
 	}
 
@@ -112,15 +136,9 @@ func (w *Worker) Run(ctx context.Context) error {
 		if err != nil && !errors.Is(err, context.Canceled) {
 			w.log.Error(ctx, "read loop stopped with error", "err", err)
 		}
-	case err := <-workErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			w.log.Error(ctx, "worker loop reported error", "err", err)
-		}
 	}
 
-	close(msgCh)
 	wg.Wait()
-
 	w.log.Info(ctx, "all workers stopped")
 
 	select {
@@ -130,18 +148,13 @@ func (w *Worker) Run(ctx context.Context) error {
 		}
 	default:
 	}
-	select {
-	case err := <-workErrCh:
-		if err != nil && !errors.Is(err, context.Canceled) {
-			return err
-		}
-	default:
-	}
 
 	return ctx.Err()
 }
 
-func (w *Worker) readLoop(ctx context.Context, out chan<- []byte, errCh chan<- error) {
+func (w *Worker) readLoop(ctx context.Context, out chan []byte, errCh chan<- error) {
+	defer close(out)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -161,7 +174,13 @@ func (w *Worker) readLoop(ctx context.Context, out chan<- []byte, errCh chan<- e
 		}
 
 		if len(msg) == 0 {
-			continue
+			select {
+			case <-ctx.Done():
+				w.log.Info(ctx, "read loop stopping")
+				return
+			case <-time.After(w.readBackoff):
+				continue
+			}
 		}
 
 		select {
@@ -173,10 +192,9 @@ func (w *Worker) readLoop(ctx context.Context, out chan<- []byte, errCh chan<- e
 	}
 }
 
-func (w *Worker) workerLoop(ctx context.Context, id int, in <-chan []byte, errCh chan<- error) {
+func (w *Worker) workerLoop(ctx context.Context, id int, in <-chan []byte) {
 	l := w.log.With("worker_id", id)
 	l.Info(ctx, "worker started")
-
 	defer l.Info(ctx, "worker stopped")
 
 	for {
@@ -187,12 +205,13 @@ func (w *Worker) workerLoop(ctx context.Context, id int, in <-chan []byte, errCh
 			if !ok {
 				return
 			}
+
 			if err := w.handleMessage(ctx, data); err != nil {
 				l.Error(ctx, "handle message failed", "err", err)
-				select {
-				case errCh <- err:
-				default:
-				}
+			}
+
+			if err := w.consumer.Commit(); err != nil {
+				l.Error(ctx, "commit failed", "err", err)
 			}
 		}
 	}
@@ -219,9 +238,30 @@ func (w *Worker) handleMessage(ctx context.Context, data []byte) error {
 		return fmt.Errorf("decrypt code: %w", err)
 	}
 
-	if err := w.sender.Send(event.Email, emailSubject, emailBodyPrefix+decryptedCode); err != nil {
-		return fmt.Errorf("send email: %w", err)
+	body := emailBodyPrefix + decryptedCode
+
+	var lastErr error
+	for attempt := 0; attempt <= w.sendMaxRetries; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if attempt > 0 {
+			backoff := w.sendRetryBase * time.Duration(1<<(attempt-1))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		if err := w.sender.Send(event.Email, emailSubject, body); err != nil {
+			lastErr = err
+			continue
+		}
+
+		return nil
 	}
 
-	return nil
+	return fmt.Errorf("send email: %w", lastErr)
 }

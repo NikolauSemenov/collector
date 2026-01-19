@@ -13,12 +13,15 @@ type stubKafkaConsumer struct {
 	subscribeErr error
 	readErr      error
 	closeErr     error
+	commitErr    error
 
 	messages []*kafka.Message
 
 	subscribedTopics []string
 	closed           bool
 	readCalls        int
+	commitCalls      int
+	lastCommitted    *kafka.Message
 }
 
 func (s *stubKafkaConsumer) SubscribeTopics(topics []string, _ kafka.RebalanceCb) error {
@@ -37,6 +40,12 @@ func (s *stubKafkaConsumer) ReadMessage(_ time.Duration) (*kafka.Message, error)
 	m := s.messages[0]
 	s.messages = s.messages[1:]
 	return m, nil
+}
+
+func (s *stubKafkaConsumer) CommitMessage(m *kafka.Message) ([]kafka.TopicPartition, error) {
+	s.commitCalls++
+	s.lastCommitted = m
+	return nil, s.commitErr
 }
 
 func (s *stubKafkaConsumer) Close() error {
@@ -287,5 +296,114 @@ func TestConsumerKafka_Close_DelegatesToUnderlyingConsumer(t *testing.T) {
 	}
 	if !stub.closed {
 		t.Fatalf("expected underlying consumer to be closed")
+	}
+}
+
+func TestConsumerKafka_Commit_NoLastMessage_IsNoop(t *testing.T) {
+	t.Parallel()
+
+	cfg := baseTestConfig()
+
+	stub := &stubKafkaConsumer{}
+	spy := &factorySpy{consumer: stub}
+
+	c, err := newConsumerKafkaWithFactory(cfg, spy.factory, func(error) bool { return false })
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	if err := c.Commit(); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if stub.commitCalls != 0 {
+		t.Fatalf("expected no commits when no message was read, got %d", stub.commitCalls)
+	}
+}
+
+func TestConsumerKafka_Commit_AfterRead_CommitsLastMessage(t *testing.T) {
+	t.Parallel()
+
+	cfg := baseTestConfig()
+
+	m1 := &kafka.Message{Value: []byte("m1")}
+	m2 := &kafka.Message{Value: []byte("m2")}
+
+	stub := &stubKafkaConsumer{
+		messages: []*kafka.Message{m1, m2},
+	}
+	spy := &factorySpy{consumer: stub}
+
+	c, err := newConsumerKafkaWithFactory(cfg, spy.factory, func(error) bool { return false })
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	got, err := c.ReadMessage()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if string(got) != "m1" {
+		t.Fatalf("expected %q, got %q", "m1", string(got))
+	}
+
+	if err := c.Commit(); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if stub.commitCalls != 1 {
+		t.Fatalf("expected 1 commit call, got %d", stub.commitCalls)
+	}
+	if stub.lastCommitted != m1 {
+		t.Fatalf("expected lastCommitted to be first message")
+	}
+
+	got, err = c.ReadMessage()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if string(got) != "m2" {
+		t.Fatalf("expected %q, got %q", "m2", string(got))
+	}
+
+	if err := c.Commit(); err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+	if stub.commitCalls != 2 {
+		t.Fatalf("expected 2 commit calls, got %d", stub.commitCalls)
+	}
+	if stub.lastCommitted != m2 {
+		t.Fatalf("expected lastCommitted to be second message")
+	}
+}
+
+func TestConsumerKafka_Commit_PropagatesCommitError(t *testing.T) {
+	t.Parallel()
+
+	cfg := baseTestConfig()
+
+	wantErr := errors.New("commit failed")
+	m := &kafka.Message{Value: []byte("m")}
+
+	stub := &stubKafkaConsumer{
+		messages:  []*kafka.Message{m},
+		commitErr: wantErr,
+	}
+	spy := &factorySpy{consumer: stub}
+
+	c, err := newConsumerKafkaWithFactory(cfg, spy.factory, func(error) bool { return false })
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	_, err = c.ReadMessage()
+	if err != nil {
+		t.Fatalf("expected nil error, got %v", err)
+	}
+
+	err = c.Commit()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected error %v, got %v", wantErr, err)
 	}
 }

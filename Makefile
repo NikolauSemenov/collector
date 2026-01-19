@@ -11,10 +11,13 @@ test-cover:
 	go tool cover -func=coverage.out
 	rm -rf ./bin coverage.out
 
+fmt:
+	go fmt ./...
+
 vet:
 	go vet ./...
 
-lint: fmt vet
+lint: fmt vet test
 
 build:
 	mkdir -p bin

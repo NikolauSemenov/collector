@@ -33,6 +33,9 @@ type fakeConsumer struct {
 	err    error
 	closed bool
 
+	commitErr error
+	commits   int
+
 	closedCh chan struct{}
 }
 
@@ -52,6 +55,11 @@ func (c *fakeConsumer) ReadMessage() ([]byte, error) {
 
 	<-c.closedCh
 	return nil, context.Canceled
+}
+
+func (c *fakeConsumer) Commit() error {
+	c.commits++
+	return c.commitErr
 }
 
 func (c *fakeConsumer) Close() error {
